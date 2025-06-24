@@ -1,0 +1,31 @@
+# config.py.template
+
+# NetBox API settings
+NETBOX_URL = "https://your-netbox-instance.com"
+NETBOX_TOKEN = "your-netbox-api-token-here"
+TLS_ROOT_CHAIN = r"C:\path\to\your\certificate.crt"
+OUI_JSON_PATH = r"C:\path\to\your\oui-lookup.json"
+
+# DHCP Server list and their associated domains for credential lookup
+# Key: DHCP Server FQDN, Value: Domain Name (used for credential lookup)
+DHCP_SERVERS = {
+    "dhcp-server-1.domain.com": "domain.com",
+    "dhcp-server-2.domain.com": "domain.com",
+    # Add more DHCP servers as needed
+}
+
+# DHCP Credentials (mapping domain names to username/password)
+# *** SECURITY WARNING: Do NOT commit this file with real passwords to public source control! ***
+# For production, consider using environment variables or a secrets management solution.
+DHCP_CREDENTIALS = {
+    "domain.com": {
+        "username": "domain\\username",
+        "password": "your-password-here"
+    },
+    # Add more domain credentials as needed
+}
+
+# Logging settings
+LOG_FILE = 'dhcp_netbox_sync.log'
+# LOG_LEVEL options: INFO, DEBUG, WARNING, ERROR, CRITICAL
+LOG_LEVEL = 'INFO'
