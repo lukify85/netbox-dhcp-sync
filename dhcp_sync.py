@@ -170,36 +170,52 @@ def get_dhcp_data(dhcp_server_fqdn, username, password):
                 return None, None
             scopes_json = "\n".join(output_scopes)
             scopes = json.loads(scopes_json)
+            
+            # Handle case where single scope is returned as dict instead of list
+            if isinstance(scopes, dict):
+                scopes = [scopes]
+                logging.debug(f"Single scope detected on {dhcp_server_fqdn}, converted to list")
+            
             logging.info(f"Retrieved {len(scopes)} scopes from {dhcp_server_fqdn}.")
 
             all_leases = []
             for scope in scopes:
-                # Handle the case where ScopeId might be a complex object
-                if isinstance(scope['ScopeId'], dict):
-                    scope_id = scope['ScopeId'].get('IPAddressToString', str(scope['ScopeId']))
-                else:
-                    scope_id = str(scope['ScopeId'])
+                try:
+                    # Handle the case where ScopeId might be a complex object
+                    if isinstance(scope['ScopeId'], dict):
+                        scope_id = scope['ScopeId'].get('IPAddressToString', str(scope['ScopeId']))
+                    else:
+                        scope_id = str(scope['ScopeId'])
+                        
+                except Exception as scope_error:
+                    logging.error(f"Error processing scope on {dhcp_server_fqdn}: {scope_error}")
+                    continue
                 
                 ps_lease = PowerShell(pool)
                 script = f"Get-DhcpServerv4Lease -ScopeId '{scope_id}' -AllLeases | ConvertTo-Json -Depth 5"
                 ps_lease.add_script(script)
                 logging.info(f"Executing Get-DhcpServerv4Lease for scope {scope_id} on {dhcp_server_fqdn}...")
-                output_leases = ps_lease.invoke()
-                if ps_lease.streams.error:
-                    for error in ps_lease.streams.error:
-                        error_msg = getattr(error, 'exception_message', str(error))
-                        logging.warning(f"Error getting leases for scope {scope_id} on {dhcp_server_fqdn}: {error_msg}")
+                
+                try:
+                    output_leases = ps_lease.invoke()
+                    if ps_lease.streams.error:
+                        for error in ps_lease.streams.error:
+                            error_msg = getattr(error, 'exception_message', str(error))
+                            logging.warning(f"Error getting leases for scope {scope_id} on {dhcp_server_fqdn}: {error_msg}")
+                        continue
+                    leases_json = "\n".join(output_leases)
+                    if leases_json.strip():  # Check if we have actual data
+                        leases = json.loads(leases_json)
+                        # Handle case where single lease is returned as dict instead of list
+                        if isinstance(leases, dict):
+                            leases = [leases]
+                        all_leases.extend(leases)
+                        logging.info(f"Retrieved {len(leases)} leases for scope {scope_id}.")
+                    else:
+                        logging.info(f"No leases found for scope {scope_id}.")
+                except Exception as lease_error:
+                    logging.error(f"Error processing leases for scope {scope_id} on {dhcp_server_fqdn}: {lease_error}")
                     continue
-                leases_json = "\n".join(output_leases)
-                if leases_json.strip():  # Check if we have actual data
-                    leases = json.loads(leases_json)
-                    # Handle case where single lease is returned as dict instead of list
-                    if isinstance(leases, dict):
-                        leases = [leases]
-                    all_leases.extend(leases)
-                    logging.info(f"Retrieved {len(leases)} leases for scope {scope_id}.")
-                else:
-                    logging.info(f"No leases found for scope {scope_id}.")
 
             return scopes, all_leases
 
