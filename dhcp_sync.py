@@ -62,6 +62,9 @@ _role_cache = {}
 # Track processed IP addresses during script runtime to avoid duplicates
 _processed_ips = set()
 
+# Track processed scopes (networks) during script runtime for cleanup
+_processed_scopes = set()
+
 # Cache for OUI lookups
 _oui_cache = None
 
@@ -274,6 +277,11 @@ def sync_to_netbox(dhcp_scopes, dhcp_leases, dhcp_server_fqdn):
             prefix_len = ipaddress.IPv4Network(f'0.0.0.0/{subnet_mask}').prefixlen
             start_ip_with_mask = f"{start_ip}/{prefix_len}"
             end_ip_with_mask = f"{end_ip}/{prefix_len}"
+            
+            # Track this scope as processed for cleanup purposes
+            scope_network = f"{scope_id}/{prefix_len}"
+            _processed_scopes.add(scope_network)
+            logging.debug(f"Added scope {scope_network} to processed scopes list")
         except Exception as e:
             logging.error(f"Error calculating prefix length for scope {scope_id}: {e}")
             continue
@@ -485,6 +493,67 @@ def sync_to_netbox(dhcp_scopes, dhcp_leases, dhcp_server_fqdn):
 
     logging.info(f"Finished NetBox synchronization for {dhcp_server_fqdn}.")
 
+def cleanup_stale_dhcp_ips():
+    """
+    Clean up stale DHCP IPs from NetBox.
+    This function fetches all IPs with status 'dhcp' from NetBox and deletes
+    any that belong to scopes processed during this run but were not updated.
+    """
+    logging.info("Starting cleanup of stale DHCP IPs in processed scopes...")
+    
+    try:
+        # If no scopes were processed, skip cleanup
+        if not _processed_scopes:
+            logging.info("No scopes were processed during this run. Skipping cleanup.")
+            return
+        
+        logging.info(f"Processed scopes during this run: {list(_processed_scopes)}")
+        
+        # Fetch all IP addresses with DHCP status from NetBox
+        dhcp_ips = list(nb.ipam.ip_addresses.filter(status="dhcp"))
+        logging.info(f"Found {len(dhcp_ips)} IP addresses with DHCP status in NetBox")
+        
+        stale_ips = []
+        for netbox_ip in dhcp_ips:
+            # Extract IP address without CIDR notation for network comparison
+            ip_address = netbox_ip.address.split('/')[0]
+            
+            # Check if this IP belongs to any of the processed scopes
+            ip_in_processed_scope = False
+            for scope_network in _processed_scopes:
+                try:
+                    if ipaddress.ip_address(ip_address) in ipaddress.ip_network(scope_network, strict=False):
+                        ip_in_processed_scope = True
+                        break
+                except Exception as e:
+                    logging.debug(f"Error checking if {ip_address} is in scope {scope_network}: {e}")
+                    continue
+            
+            # If IP is in a processed scope but wasn't updated during this run, mark it as stale
+            if ip_in_processed_scope and netbox_ip.address not in _processed_ips:
+                stale_ips.append(netbox_ip)
+        
+        if stale_ips:
+            logging.info(f"Found {len(stale_ips)} stale DHCP IPs to delete from processed scopes")
+            
+            deleted_count = 0
+            for stale_ip in stale_ips:
+                try:
+                    ip_address = stale_ip.address
+                    dns_name = getattr(stale_ip, 'dns_name', 'N/A')
+                    logging.info(f"Deleting stale DHCP IP: {ip_address} (DNS: {dns_name})")
+                    stale_ip.delete()
+                    deleted_count += 1
+                except Exception as delete_error:
+                    logging.error(f"Failed to delete stale IP {stale_ip.address}: {delete_error}")
+            
+            logging.info(f"Successfully deleted {deleted_count} stale DHCP IPs from processed scopes")
+        else:
+            logging.info("No stale DHCP IPs found in processed scopes")
+            
+    except Exception as e:
+        logging.error(f"Error during stale DHCP IP cleanup: {e}")
+
 # --- Main Execution Flow ---
 def main():
     for dhcp_server, domain_name in DHCP_SERVERS.items():
@@ -501,6 +570,9 @@ def main():
             sync_to_netbox(scopes, leases, dhcp_server)
         else:
             logging.error(f"Failed to retrieve DHCP data from {dhcp_server}.")
+
+    # After processing all DHCP servers, clean up stale DHCP IPs in processed scopes
+    cleanup_stale_dhcp_ips()
 
     logging.info("DHCP to NetBox synchronization complete.")
 
