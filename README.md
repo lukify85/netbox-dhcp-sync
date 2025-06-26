@@ -49,7 +49,7 @@ cp config.py.template config.py
 
 Ensure your NetBox instance has:
 - A role named "DHCP_RANGE_PRESENT" for IP ranges
-- Custom fields for IP addresses:
+- Custom fields for IP addresses (leveraging https://github.com/ttafsir/mac-oui-lookup; running locally):
   - `macAddress` (text field)
   - `macOUI` (text field)
 
