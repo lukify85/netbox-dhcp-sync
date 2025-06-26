@@ -182,6 +182,7 @@ def get_dhcp_data(dhcp_server_fqdn, username, password):
             logging.info(f"Retrieved {len(scopes)} scopes from {dhcp_server_fqdn}.")
 
             all_leases = []
+            active_lease_count = 0
             for scope in scopes:
                 try:
                     # Handle the case where ScopeId might be a complex object
@@ -195,9 +196,10 @@ def get_dhcp_data(dhcp_server_fqdn, username, password):
                     continue
                 
                 ps_lease = PowerShell(pool)
-                script = f"Get-DhcpServerv4Lease -ScopeId '{scope_id}' -AllLeases | ConvertTo-Json -Depth 5"
+                # Get both Active and ActiveReservation DHCP leases
+                script = f"Get-DhcpServerv4Lease -ScopeId '{scope_id}' | Where-Object {{ $_.AddressState -eq 'Active' -or $_.AddressState -eq 'ActiveReservation' }} | ConvertTo-Json -Depth 5"
                 ps_lease.add_script(script)
-                logging.info(f"Executing Get-DhcpServerv4Lease for scope {scope_id} on {dhcp_server_fqdn}...")
+                logging.info(f"Executing Get-DhcpServerv4Lease for active and reserved leases in scope {scope_id} on {dhcp_server_fqdn}...")
                 
                 try:
                     output_leases = ps_lease.invoke()
@@ -208,18 +210,21 @@ def get_dhcp_data(dhcp_server_fqdn, username, password):
                         continue
                     leases_json = "\n".join(output_leases)
                     if leases_json.strip():  # Check if we have actual data
+                        logging.debug(f"Raw lease JSON for scope {scope_id}: {leases_json[:500]}...")  # First 500 chars
                         leases = json.loads(leases_json)
                         # Handle case where single lease is returned as dict instead of list
                         if isinstance(leases, dict):
                             leases = [leases]
                         all_leases.extend(leases)
-                        logging.info(f"Retrieved {len(leases)} leases for scope {scope_id}.")
+                        active_lease_count += len(leases)
+                        logging.info(f"Retrieved {len(leases)} active leases and reservations for scope {scope_id}.")
                     else:
-                        logging.info(f"No leases found for scope {scope_id}.")
+                        logging.info(f"No active leases or reservations found for scope {scope_id}.")
                 except Exception as lease_error:
                     logging.error(f"Error processing leases for scope {scope_id} on {dhcp_server_fqdn}: {lease_error}")
                     continue
 
+            logging.info(f"Total active leases and reservations retrieved from {dhcp_server_fqdn}: {active_lease_count}")
             return scopes, all_leases
 
     except Exception as e:
@@ -330,6 +335,14 @@ def sync_to_netbox(dhcp_scopes, dhcp_leases, dhcp_server_fqdn):
         hostname = lease.get('HostName')
         lease_status = lease.get('AddressState')
         
+        # Debug logging for hostname processing
+        logging.debug(f"Processing lease {ip_address}: hostname='{hostname}' (type: {type(hostname)}), status='{lease_status}'")
+        
+        # Only process active DHCP leases and active reservations
+        if lease_status not in ['Active', 'ActiveReservation']:
+            logging.debug(f"Skipping lease {ip_address} with status '{lease_status}' (not active or active reservation)")
+            continue
+        
         # Find the scope this lease belongs to for subnet mask
         lease_scope = None
         for scope in dhcp_scopes:
@@ -379,6 +392,9 @@ def sync_to_netbox(dhcp_scopes, dhcp_leases, dhcp_server_fqdn):
             import re
             # Replace any character that's not alphanumeric, asterisk, hyphen, period, or underscore with underscore
             clean_hostname = re.sub(r'[^a-zA-Z0-9*\-._]', '_', hostname)
+            logging.debug(f"Hostname processing for {ip_address}: original='{hostname}' -> cleaned='{clean_hostname}'")
+        else:
+            logging.debug(f"No hostname provided for {ip_address}")
 
         # Skip processing if this IP has already been handled
         if full_ip_address in _processed_ips:
@@ -397,6 +413,9 @@ def sync_to_netbox(dhcp_scopes, dhcp_leases, dhcp_server_fqdn):
             # Only add dns_name if we have a valid hostname
             if clean_hostname:
                 ip_data["dns_name"] = clean_hostname
+                logging.debug(f"Adding dns_name '{clean_hostname}' to ip_data for {ip_address}")
+            else:
+                logging.debug(f"No clean_hostname for {ip_address}, dns_name will not be set")
             
             # Add custom fields if available
             custom_fields = {}
@@ -436,6 +455,7 @@ def sync_to_netbox(dhcp_scopes, dhcp_leases, dhcp_server_fqdn):
                                 # Only add dns_name if we have a valid hostname
                                 if clean_hostname:
                                     update_data['dns_name'] = clean_hostname
+                                    logging.debug(f"Adding dns_name '{clean_hostname}' to duplicate IP update for {ip_address}")
                                 if custom_fields:
                                     update_data['custom_fields'] = custom_fields
                                 
@@ -460,9 +480,13 @@ def sync_to_netbox(dhcp_scopes, dhcp_leases, dhcp_server_fqdn):
                 # Only update dns_name if we have a valid hostname
                 if clean_hostname and netbox_ip.dns_name != clean_hostname:
                     update_data['dns_name'] = clean_hostname
+                    logging.debug(f"Will update dns_name for {ip_address}: '{netbox_ip.dns_name}' -> '{clean_hostname}'")
                 elif not clean_hostname and netbox_ip.dns_name:
                     # Clear the dns_name if we don't have a hostname but NetBox has one
                     update_data['dns_name'] = ""
+                    logging.debug(f"Will clear dns_name for {ip_address}: '{netbox_ip.dns_name}' -> ''")
+                else:
+                    logging.debug(f"No dns_name change needed for {ip_address}: clean_hostname='{clean_hostname}', current='{netbox_ip.dns_name}'")
                     
                 update_data['status'] = "dhcp"
                 
